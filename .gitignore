@@ -1,0 +1,6 @@
+example/
+originalTemplate/
+client
+client.o
+server
+server.o
