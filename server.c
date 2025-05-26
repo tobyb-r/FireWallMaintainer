@@ -3,6 +3,7 @@
 #include <netinet/in.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -57,7 +58,7 @@ typedef struct rule_node {
 typedef struct {
   atomic_intptr_t next; // next rule_link
   // number of threads reading rule
-  // always >1 if this link is still linked in the list
+  // always >=1 if this link is still linked in the list
   atomic_int refcount;
   rule_node *rule;
 } rule_link;
@@ -78,11 +79,11 @@ requestlist_t requestlist;
 typedef struct {
   int fileout;
   char *buf;
-} thread_parameter;
+} thread_job;
 
 typedef struct work_node {
   struct work_node *next;
-  thread_parameter param;
+  thread_job job;
 } work_node;
 
 typedef struct {
@@ -97,7 +98,7 @@ work_list_t worklist;
 
 void *thread_work(void *);
 
-void handle_request(thread_parameter param);
+void handle_request(thread_job param);
 
 void create_threads() {
   worklist.head = worklist.tail = NULL;
@@ -145,10 +146,10 @@ void *thread_work(void *_) {
 
     pthread_mutex_unlock(&worklist.mutex);
 
-    handle_request(work->param);
+    handle_request(work->job);
 
     if (!interactive)
-      close(work->param.fileout);
+      close(work->job.fileout);
 
     free(work);
   }
@@ -156,9 +157,9 @@ void *thread_work(void *_) {
   return NULL;
 }
 
-void add_work(thread_parameter param) {
+void add_work(thread_job job) {
   work_node *work = malloc(sizeof(work_node));
-  work->param = param;
+  work->job = job;
 
   pthread_mutex_lock(&worklist.mutex);
 
@@ -325,7 +326,7 @@ int main(int argc, char **argv) {
       error("Error opening socket");
     }
 
-    bzero((char *)&servaddr, sizeof(servaddr));
+    memset((char *)&servaddr, 0, sizeof(servaddr));
     portno = atoi(argv[1]);
     servaddr.sin6_family = AF_INET6;
     servaddr.sin6_addr = in6addr_any;
@@ -358,7 +359,7 @@ int main(int argc, char **argv) {
     }
 
     // read request
-    bzero(buffer, BUFFERLENGTH);
+    memset(buffer, 0, BUFFERLENGTH);
     readbuf(infile, buffer, BUFFERLENGTH - 1);
 
     // request handling function
@@ -366,7 +367,7 @@ int main(int argc, char **argv) {
     void *buf = malloc(strlen(buffer) + 1);
     strcpy(buf, buffer);
 
-    thread_parameter param = {0};
+    thread_job param = {0};
     param.fileout = file;
     param.buf = buf;
 
@@ -381,20 +382,23 @@ int main(int argc, char **argv) {
 
     // try to set requestlist.tail to new_request_node if this is the first
     // request
-    if (atomic_compare_exchange_strong(&requestlist.tail, &nullptr,
-                                       (atomic_intptr_t)new_request_node)) {
+    if (atomic_compare_exchange_strong(&requestlist.tail, (intptr_t *)&nullptr,
+                                       (intptr_t)new_request_node)) {
+
       requestlist.head = (atomic_intptr_t)new_request_node;
     } else { // another thread got to it first
+
       request_node *old = (request_node *)atomic_exchange(
-          &requestlist.tail, (atomic_intptr_t)new_request_node);
+          &requestlist.tail, (intptr_t)new_request_node);
+
       old->next = (atomic_intptr_t)new_request_node;
     }
   }
 }
 
-void handle_request(thread_parameter params) {
-  int file = params.fileout;
-  char *buffer = params.buf;
+void handle_request(thread_job job) {
+  int file = job.fileout;
+  char *buffer = job.buf;
 
   // execute request
   if (!strcmp(buffer, "R\n")) { // list request history command
@@ -472,7 +476,7 @@ void handle_request(thread_parameter params) {
     // add our new_node node to the list
     new_link->next = (intptr_t)rulelist.head;
 
-    while (!atomic_compare_exchange_weak(&rulelist.head, &new_link->next,
+    while (!atomic_compare_exchange_weak(&rulelist.head, (intptr_t *)&new_link->next,
                                          (intptr_t)new_link))
       ;
 
